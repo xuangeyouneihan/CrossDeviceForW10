@@ -1,559 +1,444 @@
-# AppleMusicForW10
+# CrossDeviceForW10
 
-Patch the official Windows Apple Music app (`AppleInc.AppleMusicWin`) to run on
-**Windows 10 (version 21H2 / build 19044 and newer)** instead of refusing to
-start because it demands Windows 11.
+在 **Windows 10（build 19041 及以上，含 IoT 企业版 LTSC 2021）** 上安装「跨设备体验主机」（Cross Device Experience Host，`MicrosoftWindows.CrossDevice`），而不是被商店拒绝。
 
-[Русская версия ниже](#русская-версия)
+[English version below](#english)
 
-> **Disclaimer.** This is an independent, unofficial tool. It is not
-> affiliated with or endorsed by Apple Inc. **This repository contains, and
-> will never contain, any Apple binary.** `install.ps1` downloads the
-> current `AppleMusic.msixbundle` itself, directly from Microsoft's own
-> package delivery servers, at install time — the same mechanism `winget`
-> and the Microsoft Store app use. Nothing is cached or redistributed here.
+> **免责声明。** 这是一个独立的非官方工具，与 Microsoft Corporation 无任何关联，未获其认可或赞助。「Windows」「Cross Device Experience Host」等为 Microsoft Corporation 的商标。**本仓库不包含、也永远不会包含任何 Microsoft 的二进制文件。** 脚本只修改你自己合法获得的安装包，且所有修改都发生在你的本机。
+
+## 由来
+
+本仓库 fork 自 [b3s3da/AppleMusicForW10](https://github.com/b3s3da/AppleMusicForW10)。
+
+上游解决的是同一类问题：Apple Music 的 Windows 版在清单里要求 Windows 11，把一台完全够用的 Windows 10 挡在门外。它把这类门槛追到了根上——**门槛写在清单里，并不真的缺能力**——并据此写出一个只改清单、不碰二进制的最小方案。
+
+「跨设备体验主机只支持 Windows 10 22H2、在 LTSC 2021 的 21H2 上装不上」这件事困扰了我很久。中途也试过用 22H2 启用包（`KB5015684`）把系统推到 19045 来绕过，结果发现那会让 LTSC 掉进消费版的停更分支（2025-10 已终止支持），而 IoT 企业版 LTSC 2021 可以支持到 2032 年，于是又退了回来。
+
+既然上游的思路值得借鉴，就索性照它的方法论把这一例也验证到底：先确认门槛的性质，再确认需要改动的最小集合。
+
+需要说明的是，代码不是我自己写的。整个过程中我只负责提需求、实际测试和判断取舍，脚本与文档由 AI 助手（DeepSeek）生成。实测环境为 Windows 10 IoT 企业版 LTSC 2021（`10.0.19044.7807`）。
+
+上游的 `LICENSE` 与版权声明一并保留，详见 [`LICENSE`](LICENSE)。
+
+## 为什么需要它
+
+「跨设备体验主机」是 Windows 与 Android 手机对接的组件，承担「手机连接」（Phone Link）的部分能力。微软商店为其声明的最低系统版本是：
+
+```xml
+<TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19045.0" ... />
+```
+
+`10.0.19045.0` 是 **Windows 10 22H2**。于是所有 build 19044 的系统——包括 Windows 10 IoT 企业版 LTSC 2021——在商店里都装不上它。
+
+**但这个门槛是清单声明，不是技术依赖。** 包自身的运行时版本检查为：
+
+```csharp
+// CrossDevice.Core!IsUnsupportedReleaseVersion
+IsApiContractPresent("Windows.Foundation.UniversalApiContract", 10)
+```
+
+即只要求 build 19041（Windows 10 2004）。19044 与 19045 共享同一套内核与 Win32/WinRT API 面，19044 完全满足这个条件。换句话说，`19045` 这个数字描述的是「微软测试过 22H2」，而非「需要 22H2 才有的能力」。
+
+详情见 [`docs/root-cause-analysis.md`](docs/root-cause-analysis.md)。
+
+## 系统侧其实是就绪的
+
+这一点容易被误解，值得单独说明：Windows 10 19044 自己**已经内置**了对接这套组件的代码。`C:\Windows\System32\SettingsHandlers_ManagePhone.dll`（「移动设备」设置页的处理器）中包含：
+
+```
+shellcommon\shell\settingshandlers\managephone\lib\crossdeviceinstallingsetting.cpp
+shellcommon\shell\settingshandlers\managephone\lib\opencrossdevicesetting.cpp
+shellcommon\shell\settingshandlers\managephone\lib\enablecrossdevicesetting.cpp
+
+SystemSettings_Device_Phone_CrossDeviceEnabled_DialogToggle
+SystemSettings_Device_Phone_CrossDeviceInstalling
+SystemSettings_Device_Phone_OpenCrossDevice
+ms-crossdevice-settings:?scenarioId=Settings
+MicrosoftWindows.CrossDevice_8wekyb3d8bbwe      ← 商店发布者哈希
+MicrosoftWindows.CrossDevice_cw5n1h2txyewy      ← 内置发布者哈希
+```
+
+也就是说系统认识这个包、知道怎么打开它、也认识它的两种发布者身份。缺的只是「让包被注册进去」这一步。
+
+## 仓库内容
+
+| 路径 | 说明 |
+|---|---|
+| `install.ps1` | 一键安装器：定位或解析安装包 → 解包 → 改清单 → 注册 |
+| `docs/root-cause-analysis.md` | 门槛成因的完整分析与实测记录 |
+| `LICENSE` | MIT |
+
+仓库中**不含**任何 `.msix` / `.appxbundle` / `.cab`。
+
+## 用法
+
+在**普通（非提权）的 Windows PowerShell 5.1** 窗口中运行。PowerShell 7 不行——`Appx` 模块在 pwsh 下不可用。
+
+### 前提
+
+需要在「设置 → 更新和安全 → 开发者选项」中启用**开发人员模式**（或「旁加载应用」）。脚本会检查，未启用时给出开启命令。
+
+### 一键快速安装（推荐）
+
+```powershell
+irm https://raw.githubusercontent.com/xuangeyouneihan/CrossDeviceForW10/master/install.ps1 | iex
+```
+
+这一条命令会下载安装器并立即执行。
+
+如果你当前在 **PowerShell 7** 里，`iex` 会因为 `Appx` 模块不可用而中止。改用下面的形式（从 PowerShell 7 或 cmd 都能启动 5.1）：
+
+```powershell
+powershell -NoProfile -Command "irm https://raw.githubusercontent.com/xuangeyouneihan/CrossDeviceForW10/master/install.ps1 | iex"
+```
+
+**`iex` 方式无法传参数**，因此它只在下列位置查找安装包：
+
+- 当前工作目录
+- `%USERPROFILE%\Downloads`
+
+需要指定包路径、改安装位置、或安装后自动打开设置页时，请用下一节的方式。
+
+> 注意：这条命令下载的是**脚本**，不是安装包。安装包需要你自己准备（原因见 [不提供安装包](#不提供安装包)）。如果上述两个位置都没有可用的包，脚本会列出它找到的每个候选以及跳过原因。
+
+### 指定安装包运行
+
+先把脚本存到本地，再带参数运行（能力最完整）：
+
+```powershell
+irm https://raw.githubusercontent.com/xuangeyouneihan/CrossDeviceForW10/master/install.ps1 -OutFile install.ps1
+
+# 自动在脚本所在目录、上级目录、当前目录、Downloads 中寻找可用于 Windows 10 的包
+.\install.ps1
+
+# 显式指定包（推荐）
+.\install.ps1 -BundlePath '.\MicrosoftWindows.CrossDevice_1.25072.59.0_neutral_~_cw5n1h2txyewy.AppxBundle'
+
+# 装好之后直接打开设置页
+.\install.ps1 -BundlePath '...' -Launch
+```
+
+### 参数
+
+| 参数 | 说明 |
+|---|---|
+| `-BundlePath` | `.AppxBundle` / `.msixbundle` / 已解包的目录 / 单个 `.msix` |
+| `-InstallDir` | 安装位置，默认 `%LOCALAPPDATA%\Programs\CrossDevice` |
+| `-MinOs` | 写入清单的 `MinVersion`，默认 `10.0.19041.0` |
+| `-Launch` | 安装后打开 `ms-crossdevice-settings:?scenarioId=Settings` |
+| `-PreferOnline` | 先尝试从微软交付服务器解析最新版 |
+| `-SkipDependencyCheck` | 依赖不满足时仍然继续 |
+| `-Uninstall` | 注销包并删除安装目录 |
+| `-KeepData` | 与 `-Uninstall` 合用，保留每用户数据（设置项） |
+
+### 卸载
+
+```powershell
+.\install.ps1 -Uninstall            # 连数据一起清除
+.\install.ps1 -Uninstall -KeepData  # 保留「允许访问移动设备」等设置
+```
+
+## 脚本做了什么
+
+1. **定位安装包。** 给定 `-BundlePath` 就用它；否则在常见位置搜索，并**逐个解出内层 `.msix` 读取真实的 `TargetDeviceFamily`**。这一点很关键：同一个目录里往往放着多个版本，其中大部分只面向 Windows 11（见下表），脚本会跳过它们并说明原因。
+2. **解包。** 从 bundle 清单里挑 x64 应用程序包。注意必须排除 `AppxMetadata\Stub\` 下的 stub 条目——它们同样是 `Type="application"`，版本形如 `0.x`，里面没有真实载荷。
+3. **改清单。** 把 `MinVersion="10.0.19045.0"` 改为 `-MinOs` 指定的值（默认 `10.0.19041.0`）。
+4. **移除签名元数据。** 删除 `AppxSignature.p7x`、`AppxBlockMap.xml`、`[Content_Types].xml`、`AppxMetadata\CodeIntegrity.cat`。它们描述的是修改前的内容，留着会让系统判定包被篡改。
+5. **注册。** `Add-AppxPackage -Register <目录>\AppxManifest.xml`，松散注册。
+6. **校验。** 查包状态、检查依赖版本。
+
+**不改包名。** 这是本工具与同类方案最重要的区别。包身份保持 `MicrosoftWindows.CrossDevice`（家族名 `_cw5n1h2txyewy`），因为 `YourPhone.Utilities.dll`（手机连接）与 `SettingsHandlers_ManagePhone.dll` 都按这个名字硬编码引用它。改名会让宿主彻底找不到它。
+
+**不打任何二进制补丁。** 包内没有被编译进原生代码的「Windows 11 判断」需要改成恒真——仅有的 `IsNickel22H2Supported` 一类判断要求 `Major == 22621`，在 19044 与 19045 上结果相同，均返回 false，不构成两者之间的差异。
+
+## 已知限制
+
+### 界面是英文的
+
+这是目前唯一实际的功能缺口，成因是部署模型的双重约束：
+
+- **资源包不能在开发模式下注册。** 尝试注册 zh-hans 语言包时 Windows 报 `0x80073CF9`：「在注册框架或资源程序包时，不允许使用 DevelopmentMode」。
+- **带签名的原版资源包被同一道门槛拦下。** 用 `Add-AppxPackage -Path` 走正规部署时，语言包自己声明 `MinVersion="10.0.19045.0"`，在 19044 上报 `0x80073CFD`。而一旦为了降版本而修改清单，签名就失效了。
+
+经实测确认这不是缓存或语言设置问题：主包的 `resources.pri` 中检索「移动设备」「设置」「手机」「连接」等词**全部无命中**，而 zh-hans 语言包的 `resources.pri` 中**全部存在**。中文串真的不在主包里。
+
+要中文只能二选一：给整包重新签名并把自签证书装入 `LocalMachine\TrustedPeople`（需要管理员权限，且要接受在本机信任一张冒充 Microsoft 发布者名的证书），或者把系统升到 19045 后用原版语言包。
+
+### 不提供安装包
+
+脚本尝试过两条获取路径：
+
+- **本地搜索**：在你指定的位置及常见目录中查找，并按清单内容校验是否适用于 Windows 10。
+- **从微软交付服务器解析**：完整实现了「商店产品 ID → `WuCategoryId` → FE3 SOAP `GetCookie` / `SyncUpdates` / `GetExtendedUpdateInfo2`」这条流程（与 `winget` / Store 客户端同源）。但**目前微软的目录响应不再返回文件清单**——`ExtendedProperties` 中没有 `<Files>` 元素，`GetExtendedUpdateInfo2` 返回空的 `GetExtendedUpdateInfo2Result`。因此这条路目前取不到下载地址。
+
+结论：**需要自备最后一个面向 Windows 10 的构建**（见下表），用 `-BundlePath` 指定。
+
+### 版本选择
+
+本仓库开发与实测围绕 `MicrosoftWindows.CrossDevice` 的以下构建：
+
+| 版本 | `MinVersion` | 目标系统 | 包内架构 | 运行时依赖 |
+|---|---|---|---|---|
+| 1.24032.58.0 | `10.0.22621.0` | Windows 11 22H2 | arm64 / x64 / x86 | WindowsAppRuntime 1.4 |
+| **1.25072.59.0** | **`10.0.19045.0`** | **Windows 10 22H2** | arm64 / x64 / x86 | WindowsAppRuntime 1.7 |
+| 1.25092.33.0 | `10.0.22631.0` | Windows 11 23H2 | arm64 / x64 / x86 | WindowsAppRuntime 1.7 |
+| 1.26082.74.0 | `10.0.22631.0` | Windows 11 23H2 | x64 / arm64 | WindowsAppRuntime 2.1 |
+| 1.26092.74.0 | `10.0.22631.0` | Windows 11 23H2 | x64 / arm64 | WindowsAppRuntime 2.4 |
+
+**只有 `1.25072.59.0` 是面向 Windows 10 的。** 2026 年的两个构建不仅把门槛提到 22631，还砍掉了 x86。脚本会自动识别并跳过其余版本。
+
+### 关于「升到 22H2」
+
+有人用 `KB5015684`（22H2 启用包）把 19044 升到 19045 来绕过门槛。经拆解核实，该包**只写一个注册表开关**、不安装任何文件：
+
+| 组件 | FeatureManagement 覆盖项 |
+|---|---|
+| 20H2Enablement | `2093230218` |
+| 21H1Enablement | `633829003` |
+| 21H2Enablement | `2083071627` |
+| **22H2Enablement** | **`1987994252`** |
+
+写了 `1987994252`，系统就自称 19045。**系统文件一个都没变**，因此这不会让 CrossDevice 获得任何新能力。对 LTSC 2021 而言还有个代价：19045 走消费版分支（2025-10 已终止支持），而 IoT 企业版 LTSC 2021 支持到 2032-01。
+
+> 另外提醒：网上流传的「LTSC 专用」改版启用包，其 `update.mum` 在签名之后被编辑过（与 Microsoft 签名的 `update.cat` 中的哈希不符），改动内容是把 `EnterpriseS` / `EnterpriseSN` 等从适用清单里去掉/加入。功能载荷文件本身仍是微软原版，但外层不可校验。
+
+## 安全性
+
+- 不触碰 DRM、账号认证或任何联网逻辑。
+- 只修改 `AppxManifest.xml` 里 `MinVersion` 这一个属性，以及删除签名元数据。
+- 不改包身份、不改任何二进制、不改系统设置。
+- 所有改动都在 `-InstallDir` 指向的目录内，`-Uninstall` 可完全回滚。
+
+## 已知的适用性
+
+- 仅 x64。bundle 中的 arm64 包本脚本不处理。
+- 需要 build ≥ 19041。低于此版本应用自身也无法运行。
+- 需要开发者模式（松散注册的前提）。
+
+## 许可证
+
+MIT。见 [`LICENSE`](LICENSE)。
+
+本仓库为 [b3s3da/AppleMusicForW10](https://github.com/b3s3da/AppleMusicForW10) 的 fork，沿用其 MIT 许可并保留原有版权声明。
+
+---
+
+# English
+
+Install the **Cross Device Experience Host** (`MicrosoftWindows.CrossDevice`) on **Windows 10 (build 19041 or newer, including IoT Enterprise LTSC 2021)** instead of being refused by the Store.
+
+> **Disclaimer.** This is an independent, unofficial tool. It is not affiliated with, endorsed by, or sponsored by Microsoft Corporation. "Windows" and "Cross Device Experience Host" are trademarks of Microsoft Corporation. **This repository contains, and will never contain, any Microsoft binary.** The script only modifies an installer you obtained yourself, and every modification happens on your own machine.
+
+## Origin
+
+This repository is a fork of [b3s3da/AppleMusicForW10](https://github.com/b3s3da/AppleMusicForW10).
+
+Upstream tackles the same class of problem: the Windows build of Apple Music declares Windows 11 in its manifest, shutting out a Windows 10 installation that is perfectly capable of running it. It traced that class of gate to its root — **the gate lives in the manifest, not in a missing capability** — and turned that into a minimal fix that edits the manifest and touches no binary.
+
+The fact that Cross Device Experience Host claims to support only Windows 10 22H2 — and therefore refuses to install on LTSC 2021's 21H2 — had been bothering me for a long time. Along the way I also tried pushing the system to 19045 with the 22H2 enablement package (`KB5015684`), only to find that it moves LTSC onto the consumer support branch (out of support since 2025-10), while IoT Enterprise LTSC 2021 is supported through 2032. So I backed it out.
+
+Since upstream's approach was worth borrowing, I followed its methodology to settle this case too: establish the nature of the gate first, then establish the smallest set of changes required.
+
+To be clear about authorship: I did not write this code myself. I supplied the requirements, ran the tests and made the judgement calls; the script and the documentation were produced by an AI assistant (DeepSeek). The test environment was Windows 10 IoT Enterprise LTSC 2021 (`10.0.19044.7807`).
+
+Upstream's `LICENSE` and copyright notice are retained — see [`LICENSE`](LICENSE).
 
 ## Why this exists
 
-Apple's installer for the Windows Apple Music app refuses to run on Windows
-10, even on a fully patched, current build (e.g. `10.0.19044`, Windows 10 IoT
-Enterprise LTSC 21H2). The app shows no error — it just doesn't launch, or it
-crashes right after you accept the license screen.
+Cross Device Experience Host is the component that connects Windows to an Android phone and backs part of the Phone Link experience. Its Store manifest declares:
 
-**There is no real technical reason for this.** Windows 10 and Windows 11
-share the exact same NT kernel family and Win32 API surface relevant to this
-app. Apple Music for Windows is a Desktop Bridge / MSIX app built on WinUI
-and standard Win32/COM APIs — nothing it does requires a Windows-11-only
-kernel feature. The Windows-11 requirement is an artificial gate, enforced in
-two independent places:
+```xml
+<TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19045.0" ... />
+```
 
-1. **The package manifest** (`AppxManifest.xml`) declares
-   `<TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.26100.0" .../>`,
-   i.e. "Windows 11 24H2 or newer". Windows' package deployment service
-   (`AppXDeploymentServer`) enforces this at install time and refuses to
-   register the package on an older build.
-2. **`AMP.Utils.dll`** (a support DLL shipped inside the package) exports
-   functions such as `SharedUtils::IsMachineWindows11`,
-   `IsMachineWindows11_22H2_OrNewer`, and `IsMachineWindows11_24H2_OrNewer`.
-   These independently re-check the running OS build number at runtime and
-   gate app behavior on it — so even if you trick the installer into
-   registering the package, the app can still refuse to behave correctly
-   (or crash) once it's running.
+`10.0.19045.0` is Windows 10 22H2, so every build 19044 system — including Windows 10 IoT Enterprise LTSC 2021 — is refused by the Store.
 
-We reverse-engineered both checks with IDA Pro and traced the exact failure
-chain on a real Windows 10 21H2 machine (full writeup in
-[`docs/root-cause-analysis.md`](docs/root-cause-analysis.md)). The short
-version:
+**That gate is a manifest declaration, not a technical dependency.** The package's own runtime check is:
 
-- With the stock manifest, `Add-AppxPackage` aborts with `0x80073cfd`
-  (`MinVersion` not satisfied) — but not before Windows' `StateRepository`
-  (the SQLite-backed package database) has already inserted a broken,
-  `Publisher = NULL` row for the package family. Every subsequent install
-  attempt under the *same* package family name reuses that broken row,
-  which later makes `kernelbase!FindPackagesByPackageFamily` return zero
-  packages and `ActivateApplication` fail with `0x80270254`, even after you
-  lower `MinVersion` in the manifest.
-- The fix is to lower `MinVersion` **and** rename the package Identity to a
-  same-length name Windows has never seen before, forcing a clean database
-  row. `AMP.Utils.dll` independently checks that exact package name
-  (`AppleInc.AppleMusicWin`, 22 UTF-16 characters) in several places, so the
-  same string must be patched inside the DLL to match the renamed manifest.
-- `AMP.Utils.dll`'s Windows-11-version checks are patched to always return
-  `true`, since nothing downstream of them actually needs Windows 11 — they
-  exist purely to gate the OS version, not to use any OS feature.
+```csharp
+// CrossDevice.Core!IsUnsupportedReleaseVersion
+IsApiContractPresent("Windows.Foundation.UniversalApiContract", 10)
+```
 
-None of this touches DRM, licensing, or any Apple server-side logic. It
-only removes an artificial OS-version gate so the app runs on a kernel it
-is already fully compatible with.
+which only requires build 19041 (Windows 10 2004). Builds 19044 and 19045 share the same kernel and the same Win32/WinRT surface, so 19044 satisfies it comfortably. The number `19045` describes what Microsoft tested, not what the app needs.
+
+See [`docs/root-cause-analysis.md`](docs/root-cause-analysis.md) for the full analysis and test log.
+
+## The OS side is already there
+
+This is easy to get wrong, so it deserves its own section. Windows 10 19044 already ships the code that consumes this component. `C:\Windows\System32\SettingsHandlers_ManagePhone.dll` — the handler behind the "Mobile devices" settings page — contains:
+
+```
+shellcommon\shell\settingshandlers\managephone\lib\crossdeviceinstallingsetting.cpp
+shellcommon\shell\settingshandlers\managephone\lib\opencrossdevicesetting.cpp
+shellcommon\shell\settingshandlers\managephone\lib\enablecrossdevicesetting.cpp
+
+SystemSettings_Device_Phone_CrossDeviceEnabled_DialogToggle
+SystemSettings_Device_Phone_CrossDeviceInstalling
+SystemSettings_Device_Phone_OpenCrossDevice
+ms-crossdevice-settings:?scenarioId=Settings
+MicrosoftWindows.CrossDevice_8wekyb3d8bbwe      <- Store publisher hash
+MicrosoftWindows.CrossDevice_cw5n1h2txyewy      <- Inbox publisher hash
+```
+
+The OS knows this package, knows how to open it, and knows both publisher identities. What is missing is only the step that gets the package registered.
 
 ## What's in this repo
 
 | Path | What it is |
 |---|---|
-| `install.ps1` | One-command installer: downloads the current package from Microsoft, patches it, installs it. No external tools, no third-party sites, no bundled Apple binary. |
-| `cmd/applemusic-patcher/` | Go CLI alternative: same patch logic, operates on a `.msixbundle` you already have on disk |
-| `internal/pe/` | Minimal PE32+/PE32 export-table parser (no external deps) |
-| `internal/patcher/` | The actual patch logic (manifest rewrite + DLL patch) |
-| `internal/msix/` | `.msixbundle`/`.msix` unpacking and signature-file cleanup |
-| `internal/register/` | Thin wrapper around `Add-AppxPackage -Register` |
-| `scripts/patch_apple_music.py` | Python reference implementation of the Go CLI (same logic, zero dependencies) |
-| `docs/root-cause-analysis.md` | Full write-up of the reverse-engineering |
+| `install.ps1` | One-command installer: locate or resolve the package, unpack, patch the manifest, register |
+| `docs/root-cause-analysis.md` | Full write-up of the gate and the verification log |
+| `LICENSE` | MIT |
 
-All three implementations (`install.ps1`'s patch step, the Go CLI, and the
-Python script) produce **byte-identical** patched output — verified with
-`Get-FileHash` during development.
+No `.msix`, `.appxbundle` or `.cab` is included.
 
 ## Usage
 
+Run it in a **normal (non-elevated) Windows PowerShell 5.1** window. PowerShell 7 will not work — the `Appx` module is unavailable there.
+
+### Prerequisite
+
+Enable **Developer Mode** (or "Sideload apps") under Settings > Update & Security > For developers. The script checks this and prints the exact command if it is off.
+
 ### One-line install (recommended)
 
-Run this in a normal (non-admin) PowerShell window:
-
 ```powershell
-irm https://raw.githubusercontent.com/b3s3da/AppleMusicForW10/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/xuangeyouneihan/CrossDeviceForW10/master/install.ps1 | iex
 ```
 
-This single command:
+This single command downloads the installer and runs it immediately.
 
-1. Resolves the current Apple Music version and its direct CDN URL from
-   Microsoft's own package delivery servers (`fe3.delivery.mp.microsoft.com`),
-   using the same public protocol `winget`/the Store app use. No
-   `AppleMusic.msixbundle` is ever stored in this repository or downloaded
-   from anywhere other than Microsoft.
-2. Downloads it to a temp folder.
-3. Patches the manifest and `AMP.Utils.dll` (see below for exactly what
-   changes).
-4. Installs into `%LOCALAPPDATA%\Programs\AppleMusic` and registers the
-   package.
-
-To customize the run, download the script first:
+If you are currently in **PowerShell 7**, `iex` will stop because the `Appx` module is unavailable. Use this form instead (it starts 5.1 and works from PowerShell 7 or cmd):
 
 ```powershell
-irm https://raw.githubusercontent.com/b3s3da/AppleMusicForW10/main/install.ps1 -OutFile install.ps1
-.\install.ps1 -Launch                      # also launch the app when done
-.\install.ps1 -Dest "D:\Apps\AppleMusic"   # install somewhere else
-.\install.ps1 -KeepDownload                # keep the downloaded/patched files for inspection
+powershell -NoProfile -Command "irm https://raw.githubusercontent.com/xuangeyouneihan/CrossDeviceForW10/master/install.ps1 | iex"
 ```
 
-**Re-running this script later to pick up an Apple Music update is safe
-and keeps your data.** The package family name (`AppleInc.AppleMusicW10`)
-stays the same across runs, so re-registering is a normal in-place
-update, not a reinstall — your Apple ID sign-in, local library cache, and
-equalizer settings are not touched. See
-[Why updates don't wipe your sign-in](#why-updates-dont-wipe-your-sign-in)
-below for exactly what is and isn't preserved.
+**The `iex` form cannot take parameters**, so it only looks for a bundle in:
 
-### Alternative: Go CLI or Python script, for an `.msixbundle` you already have
+- the current working directory
+- `%USERPROFILE%\Downloads`
 
-If you'd rather download `AppleMusic.msixbundle` yourself (e.g. via the
-Microsoft Store app, or a sideloading tool like
-[store.rg-adguard.net](https://store.rg-adguard.net/)) and patch that exact
-file instead of letting the script fetch the latest one, use the Go CLI or
-the Python script:
+To pass a package path, change the install location, or open the settings page afterwards, use the next section.
+
+> Note: this command downloads the **script**, not the package. You supply the package yourself (see [No downloads are provided](#no-downloads-are-provided)). If neither location holds a usable bundle, the script lists every candidate it found together with the reason it was skipped.
+
+### Running a local copy
+
+Save the script first, then run it with arguments (full capability):
 
 ```powershell
-# Go CLI -- auto-detects AppleMusic.msixbundle next to the exe,
-# installs into %LOCALAPPDATA%\Programs\AppleMusic, and launches it.
-.\applemusic-patcher.exe -launch
+irm https://raw.githubusercontent.com/xuangeyouneihan/CrossDeviceForW10/master/install.ps1 -OutFile install.ps1
 
-# Or specify everything explicitly:
-.\applemusic-patcher.exe -source "C:\Downloads\AppleMusic.msixbundle" `
-                          -dest   "C:\Users\you\AppData\Local\Programs\AppleMusic" `
-                          -launch
+# Search next to the script, one level up, the current directory, and
+# Downloads for a Windows 10 compatible bundle
+.\install.ps1
+
+# Point at a specific bundle (recommended)
+.\install.ps1 -BundlePath '.\MicrosoftWindows.CrossDevice_1.25072.59.0_neutral_~_cw5n1h2txyewy.AppxBundle'
+
+# Open the settings page afterwards
+.\install.ps1 -BundlePath '...' -Launch
 ```
 
-Flags:
+### Parameters
 
-| Flag | Meaning |
+| Parameter | Meaning |
 |---|---|
-| `-source PATH` | `.msixbundle`, `*_x64.msix`, or an already-unpacked package folder. Default: auto-detected next to the executable. |
-| `-dest PATH` | Install directory. Default: `%LOCALAPPDATA%\Programs\AppleMusic`. |
-| `-in-place` | Patch and register directly inside `-source`, without copying. Useful to re-patch an already-installed/updated copy. |
-| `-launch` | Launch Apple Music once registration succeeds. |
+| `-BundlePath` | `.AppxBundle` / `.msixbundle` / unpacked folder / a single `.msix` |
+| `-InstallDir` | Target directory. Default `%LOCALAPPDATA%\Programs\CrossDevice` |
+| `-MinOs` | `MinVersion` written into the manifest. Default `10.0.19041.0` |
+| `-Launch` | Open `ms-crossdevice-settings:?scenarioId=Settings` when done |
+| `-PreferOnline` | Try Microsoft's delivery servers first |
+| `-SkipDependencyCheck` | Continue even if a dependency is missing |
+| `-Uninstall` | Unregister the package and delete the install directory |
+| `-KeepData` | With `-Uninstall`, keep the per-user data folder |
 
-Re-running the tool (e.g. after Apple pushes an app update that
-re-overwrites the files) is safe: it detects already-patched files and
-skips them without corrupting anything, and — like `install.ps1` — it
-never wipes an existing registration of the renamed package family.
-
-#### Building the Go CLI from source
-
-Requires Go 1.21+.
+### Uninstall
 
 ```powershell
-git clone https://github.com/b3s3da/AppleMusicForW10.git
-cd AppleMusicForW10
-go build -o applemusic-patcher.exe ./cmd/applemusic-patcher
+.\install.ps1 -Uninstall            # remove everything
+.\install.ps1 -Uninstall -KeepData  # keep the "allow access" toggle and friends
 ```
 
-#### Python reference version
+## How it works
 
-`scripts/patch_apple_music.py` implements the identical logic in pure
-Python 3 (standard library only — no `pip install` needed):
+1. **Locate the package.** Use `-BundlePath` if given, otherwise search common locations and **unpack each candidate far enough to read the real `TargetDeviceFamily`**. This matters: a directory typically holds several builds, most of which are Windows 11 only (see the table), and the script skips them with a reason.
+2. **Unpack.** Pick the x64 application package from the bundle manifest. The `AppxMetadata\Stub\` entries must be excluded — they are `Type="application"` too, carry version `0.x`, and hold no payload.
+3. **Patch the manifest.** Rewrite `MinVersion="10.0.19045.0"` to the value given by `-MinOs` (default `10.0.19041.0`).
+4. **Strip signature metadata.** Delete `AppxSignature.p7x`, `AppxBlockMap.xml`, `[Content_Types].xml` and `AppxMetadata\CodeIntegrity.cat`. They describe the pre-patch contents and would otherwise make Windows treat the package as tampered.
+5. **Register.** `Add-AppxPackage -Register <dir>\AppxManifest.xml`.
+6. **Verify.** Check package status and dependency versions.
 
-```powershell
-python scripts\patch_apple_music.py -s "C:\Downloads\AppleMusic.msixbundle" --launch
-```
+**The package identity is not renamed.** That is the most important difference from similar approaches. It stays `MicrosoftWindows.CrossDevice` (family `_cw5n1h2txyewy`), because both `YourPhone.Utilities.dll` (Phone Link) and `SettingsHandlers_ManagePhone.dll` reference that name literally. Renaming it would make the hosts unable to find it at all.
 
-## Why updates don't wipe your sign-in
+**No binary is patched.** There is no native `IsMachineWindows11`-style export compiled into the package to force to `true`. The only version-shaped checks, such as `IsNickel22H2Supported`, require `Major == 22621`, so they return the same `false` on 19044 and 19045 and cannot explain any difference between the two.
 
-The first time any of these tools runs on a machine where the *original*,
-unpatched Apple package (`AppleInc.AppleMusicWin`) was ever registered or
-attempted, it removes that registration. That one-time removal is
-required: that package identity's entry in Windows' `StateRepository`
-database is permanently broken on an affected machine (see
-[`docs/root-cause-analysis.md`](docs/root-cause-analysis.md)), and nothing
-short of removing it lets the renamed package register cleanly.
+## Limitations
 
-Every run after that targets only the renamed package family
-(`AppleInc.AppleMusicW10`) and never removes its existing registration
-first — `Add-AppxPackage -Register` is called directly on top of it. This
-is the same thing Windows does for a normal in-place app update: the
-package's per-user data folder
-(`%LOCALAPPDATA%\Packages\AppleInc.AppleMusicW10_nzyj5cx40ttqa\`), which
-holds your Apple ID sign-in token, local library cache, and equalizer/EQ
-settings, is left untouched. We verified this directly: the contents and
-timestamps of `LocalState`, `LocalCache\Roaming\Apple Computer\Preferences`
-(including `com.apple.Music.eq.plist`), and `Settings\settings.dat` are
-unchanged after re-running the installer to "update" an already-installed
-copy to the same or a newer version.
+### The UI is in English
 
-## How the patch works, in detail
+This is the only real functional gap, and it comes from a two-sided constraint in the deployment model:
 
-1. **Unpack.** `AppleMusic.msixbundle` is a ZIP containing one `.msix` per
-   architecture (`x64`, `arm64`). The tool finds the `x64` one and unpacks
-   it directly — no intermediate files are written to disk for the bundle
-   itself.
-2. **Strip signature metadata.** `AppxSignature.p7x`, `AppxBlockMap.xml`,
-   `[Content_Types].xml`, and `AppxMetadata\CodeIntegrity.cat` are deleted.
-   These describe the *original, unpatched* file contents; once a binary
-   inside the package is modified, Windows would otherwise refuse to load
-   it as tampered.
-3. **Patch `AppxManifest.xml`.**
-   - `MinVersion="10.0.26100.0"` → `MinVersion="10.0.19044.0"`.
-   - `<Identity Name="AppleInc.AppleMusicWin">` → `Name="AppleInc.AppleMusicW10"`
-     (same length, 22 characters — required for the string patch below to
-     line up, and to avoid the undroppable broken `StateRepository` row left
-     behind by any earlier install attempt under the original name).
-4. **Patch `AMP.Utils.dll`**, using two independent, overlapping techniques
-   so the patch keeps working even if Apple reorders or inlines functions in
-   a future build:
-   - **By export name:** every PE export whose name contains
-     `IsMachineWindows11` (`?IsMachineWindows11@SharedUtils@@YA_NXZ` and the
-     `_22H2_OrNewer`/`_24H2_OrNewer` variants) is overwritten at its entry
-     point with `B0 01 C3` (`mov al, 1; ret`) — unconditionally returns
-     `true`.
-   - **By byte signature:** the whole `.text` section is scanned for the
-     x64 instruction pattern these checks share:
-     ```
-     48 83 EC 38              sub  rsp, 38h
-     48 8D 4C 24 20           lea  rcx, [rsp+20h]
-     E8 xx xx xx xx           call GetOSVersion
-     81 7C 24 20 xx xx 00 00  cmp  dword ptr [rsp+20h], <build_number>
-     0F 93 C0                 setae al
-     48 83 C4 38              add  rsp, 38h
-     C3                       ret
-     ```
-     Any match whose captured build number looks like a real Windows 11
-     build (21996, 22621, 26100, ...) is patched the same way, even if it
-     isn't exported under a recognizable name.
-   - **Package-name string:** the UTF-16LE string `AppleInc.AppleMusicWin`
-     embedded in the DLL (used by `SharedUtils::IsMusicPackage`,
-     `GetMusicAppUserModelId`, `LaunchMusicApp`, etc. for package-identity
-     checks) is rewritten to `AppleInc.AppleMusicW10` to match the renamed
-     manifest `Identity`.
-5. **Register.** The broken stock registration of the original package
-   name is removed only if it's still present (first-run migration — see
-   [above](#why-updates-dont-wipe-your-sign-in)), then
-   `Add-AppxPackage -Register <path>\AppxManifest.xml` registers the
-   patched package in place, with no store trip, no re-download, and no
-   loss of existing sign-in/library data on repeat runs.
+- **Resource packages cannot be registered in Developer Mode.** Registering the zh-hans language package fails with `0x80073CF9`: "DevelopmentMode is not allowed when registering framework or resource packages."
+- **The signed original is blocked by the same gate.** Deploying it properly with `Add-AppxPackage -Path` fails with `0x80073CFD`, because the language package itself declares `MinVersion="10.0.19045.0"`. Editing the manifest to lower it invalidates the signature.
 
-## Limitations / what this does *not* do
+This is not a cache or locale problem: searching the main package's `resources.pri` for "移动设备", "设置", "手机" and "连接" yields **no matches**, while the zh-hans package's `resources.pri` contains them all. The Chinese strings genuinely are not in the main package.
 
-- It does not break or bypass DRM, Apple ID auth, or Apple Music
-  subscription checks — those are unaffected by the OS-version gate.
-- It does not add ARM64-on-Windows-10 support beyond what the `arm64.msix`
-  in the bundle already implies (the tool currently targets `x64` only; PRs
-  for `arm64` are welcome, the logic is identical).
-- Apple could tighten the checks in a future update (real
-  Windows-11-exclusive API usage, different signature, etc.) — that's an
-  engineering choice they haven't made for this app as of this release;
-  this tool patches what is actually there today.
+Getting Chinese requires one of: re-signing the whole package with a self-signed certificate trusted in `LocalMachine\TrustedPeople` (admin rights, and trusting a certificate that impersonates Microsoft's publisher name), or moving the system to 19045 and installing the original language packages.
 
-## Contributing
+### No downloads are provided
 
-Issues and PRs are welcome — in particular, confirmation (or signature
-updates) for other package versions. See
-[`docs/root-cause-analysis.md`](docs/root-cause-analysis.md) for the full
-RE notes if you want to verify or extend the patch for a new build.
+Two acquisition paths exist:
+
+- **Local search** — find and validate candidates by their manifest.
+- **Microsoft delivery servers** — the full "Store product id → `WuCategoryId` → FE3 SOAP `GetCookie` / `SyncUpdates` / `GetExtendedUpdateInfo2`" flow used by `winget` and the Store client. However, **Microsoft's catalog response no longer includes a file list**: there is no `<Files>` element in `ExtendedProperties`, and `GetExtendedUpdateInfo2` returns an empty `GetExtendedUpdateInfo2Result`. This path currently yields no URL.
+
+So: **bring the last Windows 10 build yourself** and pass it with `-BundlePath`.
+
+### Which build to use
+
+| Version | `MinVersion` | Target | Architectures | Runtime dependency |
+|---|---|---|---|---|
+| 1.24032.58.0 | `10.0.22621.0` | Windows 11 22H2 | arm64 / x64 / x86 | WindowsAppRuntime 1.4 |
+| **1.25072.59.0** | **`10.0.19045.0`** | **Windows 10 22H2** | arm64 / x64 / x86 | WindowsAppRuntime 1.7 |
+| 1.25092.33.0 | `10.0.22631.0` | Windows 11 23H2 | arm64 / x64 / x86 | WindowsAppRuntime 1.7 |
+| 1.26082.74.0 | `10.0.22631.0` | Windows 11 23H2 | x64 / arm64 | WindowsAppRuntime 2.1 |
+| 1.26092.74.0 | `10.0.22631.0` | Windows 11 23H2 | x64 / arm64 | WindowsAppRuntime 2.4 |
+
+**Only `1.25072.59.0` targets Windows 10.** The two 2026 builds raise the floor to 22631 and drop x86 as well. The script detects and skips the rest.
+
+### About "just upgrade to 22H2"
+
+Some guides use `KB5015684` (the 22H2 enablement package) to turn 19044 into 19045 and clear the gate. Unpacking it confirms that it **writes a single registry flag and installs no files at all**:
+
+| Component | FeatureManagement override |
+|---|---|
+| 20H2Enablement | `2093230218` |
+| 21H1Enablement | `633829003` |
+| 21H2Enablement | `2083071627` |
+| **22H2Enablement** | **`1987994252`** |
+
+Writing `1987994252` makes the system report 19045. **Not one system file changes**, so this grants CrossDevice no new capability. For LTSC 2021 there is also a cost: 19045 follows the consumer branch (out of support since 2025-10), while IoT Enterprise LTSC 2021 is supported through 2032-01.
+
+> Also worth knowing: the "LTSC-specific" repack circulated online has an `update.mum` that was edited after signing (its hash does not match the Microsoft-signed `update.cat`). The edit adds/removes `EnterpriseS`, `EnterpriseSN` and friends from the applicability list. The payload files themselves are still Microsoft originals, but the outer layer cannot be verified.
+
+## What this does not do
+
+- It does not touch DRM, account authentication, or any network logic.
+- It only changes `MinVersion` in `AppxManifest.xml` and deletes signature metadata.
+- It does not rename the package, patch any binary, or modify system settings.
+- Everything happens inside `-InstallDir`; `-Uninstall` rolls it all back.
+
+## Applicability
+
+- x64 only. The arm64 package inside the bundle is not handled.
+- Requires build >= 19041; below that the app itself cannot run.
+- Requires Developer Mode (a prerequisite for loose registration).
 
 ## License
 
-MIT. See [`LICENSE`](LICENSE). Not affiliated with Apple Inc.
+MIT. See [`LICENSE`](LICENSE).
 
----
-
-# Русская версия
-
-Патчер для официального Windows-приложения Apple Music
-(`AppleInc.AppleMusicWin`), чтобы оно запускалось на **Windows 10 (версия
-21H2 / сборка 19044 и новее)** вместо того, чтобы требовать Windows 11 и
-не запускаться.
-
-> **Дисклеймер.** Это независимый неофициальный инструмент. Он не
-> связан с Apple Inc. и не одобрен ею. **В этом репозитории нет и никогда
-> не будет ни одного бинарника Apple.** `install.ps1` сам скачивает
-> актуальный `AppleMusic.msixbundle` напрямую с серверов доставки пакетов
-> Microsoft в момент установки — тем же механизмом, которым пользуются
-> `winget` и сам клиент Microsoft Store. Здесь ничего не кешируется и не
-> распространяется повторно.
-
-## Зачем это нужно
-
-Официальный установщик Apple Music для Windows отказывается запускаться на
-Windows 10, даже на полностью актуальной сборке (например `10.0.19044`,
-Windows 10 IoT Enterprise LTSC 21H2). Приложение не показывает ошибку — оно
-просто не запускается, либо падает сразу после принятия лицензионного
-соглашения.
-
-**Реальной технической причины для этого нет.** Windows 10 и Windows 11
-используют одно и то же семейство ядра NT и один и тот же набор Win32 API,
-важный для этого приложения. Apple Music для Windows — это приложение на
-Desktop Bridge / MSIX, построенное на WinUI и стандартных Win32/COM API:
-в нём нет ничего, что требует функций ядра, доступных только в Windows 11.
-Требование Windows 11 — искусственное ограничение, установленное в двух
-независимых местах:
-
-1. **Манифест пакета** (`AppxManifest.xml`) объявляет
-   `<TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.26100.0" .../>`,
-   то есть "Windows 11 24H2 и новее". Служба развёртывания пакетов Windows
-   (`AppXDeploymentServer`) проверяет это при установке и отказывается
-   регистрировать пакет на более старой сборке.
-2. **`AMP.Utils.dll`** (вспомогательная DLL внутри пакета) экспортирует
-   функции `SharedUtils::IsMachineWindows11`,
-   `IsMachineWindows11_22H2_OrNewer`, `IsMachineWindows11_24H2_OrNewer`. Они
-   независимо проверяют номер сборки ОС уже во время работы приложения и
-   блокируют поведение на основе этой проверки — то есть даже если обойти
-   установщик, приложение всё равно может отказать в работе или упасть уже
-   после запуска.
-
-Мы реверс-инжинирили обе проверки в IDA Pro и прошли по цепочке реального
-сбоя на живой машине с Windows 10 21H2 (полный разбор — в
-[`docs/root-cause-analysis.md`](docs/root-cause-analysis.md)). Короткая
-версия:
-
-- С оригинальным манифестом `Add-AppxPackage` падает с `0x80073cfd`
-  (не выполнено условие `MinVersion`) — но перед этим `StateRepository`
-  (SQLite-база пакетов Windows) уже успевает вставить сломанную запись с
-  `Publisher = NULL` для семейства пакета. Любая последующая попытка
-  установки под *тем же* именем семейства пакета переиспользует эту
-  сломанную запись, из-за чего `kernelbase!FindPackagesByPackageFamily`
-  позже возвращает ноль пакетов, а `ActivateApplication` падает с
-  `0x80270254` — даже после понижения `MinVersion` в манифесте.
-- Решение — понизить `MinVersion` **и** переименовать Identity пакета в имя
-  той же длины, которое Windows ещё не видела, чтобы вынудить создать
-  чистую запись в базе. `AMP.Utils.dll` независимо проверяет именно это имя
-  пакета (`AppleInc.AppleMusicWin`, 22 символа UTF-16) в нескольких местах,
-  поэтому ту же строку нужно пропатчить внутри DLL, чтобы она совпадала с
-  переименованным манифестом.
-- Проверки версии Windows 11 в `AMP.Utils.dll` патчатся так, чтобы всегда
-  возвращать `true` — ничего из того, что идёт после этих проверок, реально
-  не требует Windows 11: они существуют только для блокировки по версии ОС,
-  а не для использования какой-либо её функции.
-
-Всё это не затрагивает DRM, авторизацию Apple ID или проверки подписки
-Apple Music. Патч только убирает искусственное ограничение по версии ОС,
-чтобы приложение работало на ядре, с которым оно уже полностью совместимо.
-
-## Что лежит в репозитории
-
-| Путь | Что это |
-|---|---|
-| `install.ps1` | Установщик в одну команду: сам скачивает актуальный пакет у Microsoft, патчит его, устанавливает. Без сторонних инструментов, без сторонних сайтов, без бинарника Apple внутри репозитория. |
-| `cmd/applemusic-patcher/` | Альтернативный CLI на Go: та же логика патча, работает с `.msixbundle`, который уже есть у вас на диске |
-| `internal/pe/` | Минимальный парсер таблицы экспортов PE32+/PE32 (без внешних зависимостей) |
-| `internal/patcher/` | Собственно логика патчей (манифест + DLL) |
-| `internal/msix/` | Распаковка `.msixbundle`/`.msix` и очистка файлов подписи |
-| `internal/register/` | Тонкая обёртка над `Add-AppxPackage -Register` |
-| `scripts/patch_apple_music.py` | Эталонная реализация CLI на Python (та же логика, без зависимостей) |
-| `docs/root-cause-analysis.md` | Полный разбор реверс-инжиниринга |
-
-Все три реализации (патч-шаг `install.ps1`, CLI на Go и скрипт на Python)
-дают **побайтово идентичный** результат — проверено через `Get-FileHash`
-в процессе разработки.
-
-## Использование
-
-### Установка в одну команду (рекомендуется)
-
-Выполните в обычном (не от администратора) окне PowerShell:
-
-```powershell
-irm https://raw.githubusercontent.com/b3s3da/AppleMusicForW10/main/install.ps1 | iex
-```
-
-Эта одна команда:
-
-1. Получает текущую версию Apple Music и прямую ссылку на CDN напрямую с
-   серверов доставки пакетов Microsoft (`fe3.delivery.mp.microsoft.com`),
-   тем же публичным протоколом, которым пользуются `winget` и клиент
-   Store. `AppleMusic.msixbundle` никогда не хранится в этом репозитории и
-   не скачивается ниоткуда, кроме серверов Microsoft.
-2. Скачивает его во временную папку.
-3. Патчит манифест и `AMP.Utils.dll` (подробности ниже).
-4. Устанавливает в `%LOCALAPPDATA%\Programs\AppleMusic` и регистрирует
-   пакет.
-
-Чтобы настроить запуск, сначала скачайте скрипт:
-
-```powershell
-irm https://raw.githubusercontent.com/b3s3da/AppleMusicForW10/main/install.ps1 -OutFile install.ps1
-.\install.ps1 -Launch                      # также запустить приложение после установки
-.\install.ps1 -Dest "D:\Apps\AppleMusic"   # установить в другое место
-.\install.ps1 -KeepDownload                # оставить скачанные/пропатченные файлы для проверки
-```
-
-**Повторный запуск этого скрипта позже, чтобы подхватить обновление Apple
-Music, безопасен и сохраняет ваши данные.** Имя семейства пакета
-(`AppleInc.AppleMusicW10`) не меняется между запусками, поэтому
-перерегистрация — это обычное обновление на месте, а не переустановка:
-вход в Apple ID, локальный кеш библиотеки и настройки эквалайзера не
-затрагиваются. Подробности — в разделе
-[Почему обновления не сбрасывают вход](#почему-обновления-не-сбрасывают-вход)
-ниже.
-
-### Альтернатива: CLI на Go или скрипт на Python, для уже скачанного `.msixbundle`
-
-Если вы предпочитаете сами скачать `AppleMusic.msixbundle` (например через
-приложение Microsoft Store или инструмент для сайдлоада, такой как
-[store.rg-adguard.net](https://store.rg-adguard.net/)) и пропатчить именно
-этот файл, а не дать скрипту скачать последнюю версию самому — используйте
-CLI на Go или скрипт на Python:
-
-```powershell
-# CLI на Go — автоматически находит AppleMusic.msixbundle рядом с exe,
-# устанавливает в %LOCALAPPDATA%\Programs\AppleMusic и запускает.
-.\applemusic-patcher.exe -launch
-
-# Либо укажите всё явно:
-.\applemusic-patcher.exe -source "C:\Downloads\AppleMusic.msixbundle" `
-                          -dest   "C:\Users\you\AppData\Local\Programs\AppleMusic" `
-                          -launch
-```
-
-Флаги:
-
-| Флаг | Значение |
-|---|---|
-| `-source PATH` | `.msixbundle`, `*_x64.msix`, либо уже распакованная папка пакета. По умолчанию: автопоиск рядом с исполняемым файлом. |
-| `-dest PATH` | Директория установки. По умолчанию: `%LOCALAPPDATA%\Programs\AppleMusic`. |
-| `-in-place` | Патчить и регистрировать прямо внутри `-source`, без копирования. Удобно для повторного патча уже установленной/обновлённой копии. |
-| `-launch` | Запустить Apple Music после успешной регистрации. |
-
-Повторный запуск инструмента (например после того, как Apple выпустит
-обновление приложения и перезапишет файлы) безопасен: он обнаруживает уже
-пропатченные файлы и пропускает их без порчи данных, и — как и
-`install.ps1` — никогда не удаляет существующую регистрацию
-переименованного семейства пакета.
-
-#### Сборка CLI на Go из исходников
-
-Требуется Go 1.21+.
-
-```powershell
-git clone https://github.com/b3s3da/AppleMusicForW10.git
-cd AppleMusicForW10
-go build -o applemusic-patcher.exe ./cmd/applemusic-patcher
-```
-
-#### Эталонная версия на Python
-
-`scripts/patch_apple_music.py` реализует идентичную логику на чистом
-Python 3 (только стандартная библиотека — `pip install` не требуется):
-
-```powershell
-python scripts\patch_apple_music.py -s "C:\Downloads\AppleMusic.msixbundle" --launch
-```
-
-## Почему обновления не сбрасывают вход
-
-При первом запуске на машине, где когда-либо был зарегистрирован или хотя
-бы пытался зарегистрироваться *оригинальный*, непропатченный пакет Apple
-(`AppleInc.AppleMusicWin`), эта регистрация удаляется. Это единоразовое
-удаление необходимо: запись этого имени пакета в базе `StateRepository`
-Windows навсегда сломана на затронутой машине (см.
-[`docs/root-cause-analysis.md`](docs/root-cause-analysis.md)), и ничто
-кроме удаления не позволяет переименованному пакету зарегистрироваться
-чисто.
-
-Каждый следующий запуск работает только с переименованным семейством
-пакета (`AppleInc.AppleMusicW10`) и никогда не удаляет его существующую
-регистрацию перед установкой — `Add-AppxPackage -Register` вызывается
-прямо поверх неё. Это то же самое, что Windows делает при обычном
-обновлении приложения на месте: папка данных пакета для текущего
-пользователя
-(`%LOCALAPPDATA%\Packages\AppleInc.AppleMusicW10_nzyj5cx40ttqa\`), где
-хранится токен входа в Apple ID, локальный кеш библиотеки и настройки
-эквалайзера, не затрагивается. Мы проверили это напрямую: содержимое и
-временные метки `LocalState`, `LocalCache\Roaming\Apple
-Computer\Preferences` (включая `com.apple.Music.eq.plist`) и
-`Settings\settings.dat` не изменились после повторного запуска установщика
-для "обновления" уже установленной копии до той же или более новой
-версии.
-
-## Как работает патч, подробно
-
-1. **Распаковка.** `AppleMusic.msixbundle` — это ZIP-архив с одним `.msix` на
-   каждую архитектуру (`x64`, `arm64`). Инструмент находит `x64`-версию и
-   распаковывает её напрямую — никакие промежуточные файлы для самого
-   бандла на диск не пишутся.
-2. **Удаление метаданных подписи.** Удаляются `AppxSignature.p7x`,
-   `AppxBlockMap.xml`, `[Content_Types].xml` и
-   `AppxMetadata\CodeIntegrity.cat`. Они описывают *оригинальное,
-   непропатченное* содержимое файлов; после изменения любого бинарника
-   внутри пакета Windows иначе откажется его загружать как повреждённый.
-3. **Патч `AppxManifest.xml`.**
-   - `MinVersion="10.0.26100.0"` → `MinVersion="10.0.19044.0"`.
-   - `<Identity Name="AppleInc.AppleMusicWin">` → `Name="AppleInc.AppleMusicW10"`
-     (та же длина, 22 символа — нужна, чтобы совпасть со строковым патчем
-     ниже, и чтобы избежать неустранимой сломанной записи в
-     `StateRepository`, оставшейся от любой предыдущей попытки установки
-     под оригинальным именем).
-4. **Патч `AMP.Utils.dll`** двумя независимыми, перекрывающими друг друга
-   способами, чтобы патч продолжал работать даже если Apple переставит
-   порядок функций или заинлайнит их в будущей сборке:
-   - **По имени экспорта:** каждый экспорт PE, чьё имя содержит
-     `IsMachineWindows11` (`?IsMachineWindows11@SharedUtils@@YA_NXZ` и
-     варианты `_22H2_OrNewer`/`_24H2_OrNewer`), перезаписывается в точке
-     входа байтами `B0 01 C3` (`mov al, 1; ret`) — безусловно возвращает
-     `true`.
-   - **По байтовой сигнатуре:** вся секция `.text` сканируется на паттерн
-     инструкций x64, общий для этих проверок:
-     ```
-     48 83 EC 38              sub  rsp, 38h
-     48 8D 4C 24 20           lea  rcx, [rsp+20h]
-     E8 xx xx xx xx           call GetOSVersion
-     81 7C 24 20 xx xx 00 00  cmp  dword ptr [rsp+20h], <номер_сборки>
-     0F 93 C0                 setae al
-     48 83 C4 38              add  rsp, 38h
-     C3                       ret
-     ```
-     Любое совпадение, где захваченный номер сборки похож на настоящую
-     сборку Windows 11 (21996, 22621, 26100, ...), патчится так же, даже
-     если функция не экспортирована под узнаваемым именем.
-   - **Строка имени пакета:** встроенная в DLL UTF-16LE строка
-     `AppleInc.AppleMusicWin` (используется `SharedUtils::IsMusicPackage`,
-     `GetMusicAppUserModelId`, `LaunchMusicApp` и др. для проверки identity
-     пакета) переписывается в `AppleInc.AppleMusicW10`, чтобы совпадать с
-     переименованным `Identity` в манифесте.
-5. **Регистрация.** Сломанная регистрация оригинального имени пакета
-   удаляется только если она ещё присутствует (единоразовая миграция —
-   см. [выше](#почему-обновления-не-сбрасывают-вход)), затем
-   `Add-AppxPackage -Register <путь>\AppxManifest.xml` регистрирует
-   пропатченный пакет на месте, без обращения в Store, без повторной
-   загрузки и без потери уже существующих данных входа/библиотеки при
-   повторных запусках.
-
-## Ограничения / чего этот инструмент не делает
-
-- Он не ломает и не обходит DRM, авторизацию Apple ID или проверки подписки
-  Apple Music — они не затрагиваются ограничением по версии ОС.
-- Он не добавляет поддержку ARM64 на Windows 10 сверх того, что уже
-  подразумевает `arm64.msix` в бандле (сейчас инструмент работает только с
-  `x64`; PR для `arm64` приветствуются, логика идентична).
-- Apple может в будущем обновлении усилить проверки (реальное использование
-  API, доступного только в Windows 11, другая сигнатура и т.д.) — на момент
-  этого релиза такого инженерного решения в приложении нет; этот инструмент
-  патчит то, что реально присутствует сегодня.
-
-## Участие в разработке
-
-Issues и PR приветствуются — особенно подтверждение (или обновление
-сигнатур) для других версий пакета. Полные заметки по реверс-инжинирингу —
-в [`docs/root-cause-analysis.md`](docs/root-cause-analysis.md), если
-хотите проверить или расширить патч для новой сборки.
-
-## Лицензия
-
-MIT. См. [`LICENSE`](LICENSE). Не связано с Apple Inc.
+This repository is a fork of [b3s3da/AppleMusicForW10](https://github.com/b3s3da/AppleMusicForW10); the MIT license and the original copyright notice are retained.

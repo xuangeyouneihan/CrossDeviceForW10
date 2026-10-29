@@ -1,6 +1,7 @@
 MIT License
 
 Copyright (c) 2026 AppleMusicForW10 contributors
+Copyright (c) 2026 CrossDeviceForW10 contributors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to
@@ -22,8 +23,22 @@ IN THE SOFTWARE.
 
 ---
 
-This project is an independent, unofficial patcher. It is not affiliated
-with, endorsed by, or sponsored by Apple Inc. "Apple Music" is a trademark
-of Apple Inc. This repository contains no Apple Inc. copyrighted binaries;
-it only modifies files that you supply yourself from your own legitimately
-obtained installer.
+This project is an independent, unofficial tool. It is not affiliated with,
+endorsed by, or sponsored by Microsoft Corporation. "Windows", "Microsoft
+Store" and "Cross Device Experience Host" are trademarks of Microsoft
+Corporation.
+
+This repository contains no Microsoft binaries and never will. It contains
+only the installer script and documentation; the script modifies a package
+that you obtain yourself and keeps every modification on your own machine.
+
+The script changes exactly two things: the MinVersion attribute in the
+package's AppxManifest.xml, and the removal of signature metadata that
+describes the package's pre-patch contents. It does not rename the package,
+patch any executable, alter DRM or account authentication, or change any
+system setting outside its own install directory.
+
+Modifying a signed application package invalidates its signature, so the
+patched copy is installed as a loose (developer mode) package under your own
+user profile. You are responsible for complying with the licence terms that
+apply to the package you install and with your local law.
